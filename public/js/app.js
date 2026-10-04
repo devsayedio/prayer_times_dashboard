@@ -208,7 +208,7 @@ async function loadNotifications() {
     statCard('Open rate', `${metrics.openRate || 0}%`, '%', '#f5f3ff', '#7c3aed')
   ].join('');
   document.getElementById('notificationHistory').innerHTML = items.length
-    ? items.map(item => `<div class="timeline-item ${item.status === 'success' ? '' : 'fail'}"><i></i><div><div class="timeline-head"><strong>${escapeHtml(item.title || 'Untitled')}</strong><button class="mini-btn danger" data-action="delete-notification" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.title || 'Notification')} history delete করুন">Delete</button></div><p>${escapeHtml(item.body || '')}</p><div class="timeline-meta"><small>${escapeHtml(item.target || 'unknown')} · ${formatDateTime(item.timestamp)} · ${escapeHtml(item.status || 'unknown')}</small>${notificationTrackingBadges(item)}</div></div></div>`).join('')
+    ? items.map(item => `<div class="timeline-item ${item.status === 'fail' ? 'fail' : item.status === 'partial' || item.status === 'sending' ? 'pending' : ''}"><i></i><div><div class="timeline-head"><strong>${escapeHtml(item.title || 'Untitled')}</strong><button class="mini-btn danger" data-action="delete-notification" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.title || 'Notification')} history delete করুন">Delete</button></div><p>${escapeHtml(item.body || '')}</p><div class="timeline-meta"><small>${escapeHtml(item.target || 'unknown')} · ${formatDateTime(item.timestamp)} · ${escapeHtml(({ success: 'সফল', partial: 'আংশিক সফল', fail: 'ব্যর্থ', sending: 'পাঠানো হচ্ছে' })[item.status] || item.status || 'unknown')}</small>${notificationTrackingBadges(item)}</div></div></div>`).join('')
     : '<div class="empty-state">কোনো notification history নেই</div>';
 }
 
@@ -230,14 +230,19 @@ async function sendNotification(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const values = Object.fromEntries(new FormData(form));
-  const targetText = values.target === 'all_users' ? 'সব ব্যবহারকারী' : 'একটি নির্দিষ্ট ডিভাইস';
+  const targetText = values.target === 'all_users' ? 'নিবন্ধিত সব ডিভাইস' : 'একটি নির্দিষ্ট ডিভাইস';
   if (!window.confirm(`${targetText}-এর কাছে এই notification পাঠাবেন?`)) return;
   await submitForm(form, async () => {
-    const result = await api('/api/notifications/send', { method: 'POST', body: JSON.stringify(values) });
-    toast(result.message || 'Notification পাঠানো হয়েছে');
-    form.reset();
-    document.getElementById('tokenField').classList.add('hidden');
-    await loadNotifications();
+    try {
+      const result = await api('/api/notifications/send', { method: 'POST', body: JSON.stringify(values) });
+      toast(result.message || 'Notification পাঠানো হয়েছে');
+      form.reset();
+      document.getElementById('tokenField').classList.add('hidden');
+    } finally {
+      state.analytics = null;
+      state.overview = null;
+      await loadNotifications().catch(error => toast(`History refresh ব্যর্থ: ${error.message}`, true));
+    }
   });
 }
 

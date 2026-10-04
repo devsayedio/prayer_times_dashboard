@@ -9,6 +9,7 @@ const express = require('express');
 const { applicationDefault, cert, getApps, initializeApp } = require('firebase-admin/app');
 const { FieldValue, Timestamp, getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
+const { sendTrackedNotification } = require('./lib/notification_sender');
 const packageInfo = require('./package.json');
 
 const ROOT = __dirname;
@@ -292,7 +293,8 @@ app.get('/api/analytics', asyncRoute(async (_req, res) => {
   let opened = 0;
   for (const document of logsSnapshot.docs) {
     const data = document.data();
-    data.status === 'success' ? success += 1 : failed += 1;
+    if (data.status === 'success' || data.status === 'partial') success += 1;
+    else if (data.status === 'fail') failed += 1;
     targeted += number(data.targetedCount, 0, 0);
     received += number(data.receivedCount, 0, 0);
     opened += number(data.openedCount, 0, 0);
@@ -308,7 +310,7 @@ app.get('/api/analytics', asyncRoute(async (_req, res) => {
       totalUsers: devicesSnapshot.size,
       activeUsers,
       notificationStats: {
-        total: success + failed,
+        total: logsSnapshot.size,
         success,
         fail: failed,
         targeted,
@@ -347,7 +349,7 @@ app.get('/api/notifications/metrics', asyncRoute(async (_req, res) => {
     totals.targeted += number(data.targetedCount, 0, 0);
     totals.received += number(data.receivedCount, 0, 0);
     totals.opened += number(data.openedCount, 0, 0);
-    if (data.status === 'success') totals.accepted += 1;
+    if (data.status === 'success' || data.status === 'partial') totals.accepted += 1;
     if (data.status === 'fail') totals.failed += 1;
     return totals;
   }, { campaigns: 0, accepted: 0, failed: 0, targeted: 0, received: 0, opened: 0 });
@@ -371,7 +373,12 @@ app.delete('/api/notifications/:id', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/notifications/send', asyncRoute(async (req, res) => {
-  const target = req.body.target === 'single_user' ? 'single_user' : 'all_users';
+  const target = req.body.target;
+  if (!['single_user', 'all_users'].includes(target)) {
+    const error = new Error('নোটিফিকেশনের সঠিক target নির্বাচন করুন।');
+    error.statusCode = 400;
+    throw error;
+  }
   const title = required(req.body.title, 'title', 140);
   const body = required(req.body.body, 'body', 500);
   const fcmToken = text(req.body.fcmToken, 4096);
@@ -382,68 +389,9 @@ app.post('/api/notifications/send', asyncRoute(async (req, res) => {
   }
   const imageUrl = text(req.body.imageUrl, 1000);
   const actionUrl = text(req.body.actionUrl, 1000);
-  const targetedCount = target === 'single_user'
-    ? 1
-    : await collectionCount('device_tokens');
-  const campaignId = crypto.randomUUID();
-  const analyticsLabel = `campaign_${campaignId.replaceAll('-', '')}`;
-  const data = { type: 'push', campaignId };
-  if (imageUrl) data.imageUrl = imageUrl;
-  if (actionUrl) data.actionUrl = actionUrl;
-
-  const message = {
-    notification: { title, body },
-    data,
-    android: {
-      priority: 'high',
-      notification: {
-        sound: 'hayya_ala_salah',
-        channelId: 'com.amatullah.prayer_times_push_notification',
-        ...(imageUrl ? { imageUrl } : {})
-      }
-    },
-    fcmOptions: { analyticsLabel },
-    ...(target === 'single_user' ? { token: fcmToken } : { topic: 'all_users' })
-  };
-
-  const logReference = db.collection('notification_logs').doc(campaignId);
-  await logReference.set({
-    timestamp: FieldValue.serverTimestamp(),
-    target,
-    targetedCount,
-    receivedCount: 0,
-    openedCount: 0,
-    title,
-    body,
-    imageUrl,
-    actionUrl,
-    analyticsLabel,
-    campaignId,
-    status: 'sending'
-  });
-
-  try {
-    const messageId = await messaging.send(message);
-    await logReference.update({
-      status: 'success',
-      messageId,
-      sentAt: FieldValue.serverTimestamp()
-    });
-    res.json({
-      success: true,
-      message: `Notification accepted for ${targetedCount} targeted device${targetedCount === 1 ? '' : 's'}.`,
-      messageId,
-      campaignId,
-      targetedCount
-    });
-  } catch (error) {
-    await logReference.update({
-      status: 'fail',
-      error: text(error.message, 500),
-      failedAt: FieldValue.serverTimestamp()
-    }).catch(() => {});
-    throw error;
-  }
+  res.json(await sendTrackedNotification({
+    db, messaging, target, title, body, fcmToken, imageUrl, actionUrl
+  }));
 }));
 
 app.get('/api/events', asyncRoute(async (req, res) => {

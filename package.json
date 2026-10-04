@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
-    "check": "node --check server.js && node --check public/js/app.js"
+    "check": "node --check server.js && node --check public/js/app.js && node --check lib/notification_sender.js",
+    "check:notifications": "node scripts/check-notification-sender.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
