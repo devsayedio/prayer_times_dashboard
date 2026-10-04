@@ -242,6 +242,65 @@ async function collectionCount(name) {
   return snapshot.data().count;
 }
 
+function supportMonthFor(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit'
+  }).formatToParts(date);
+  return `${parts.find(part => part.type === 'year').value}-${parts.find(part => part.type === 'month').value}`;
+}
+
+function supportMonthRange(month) {
+  const yearValue = Number(month.slice(0, 4));
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || yearValue < 2020 || yearValue > 2200) {
+    const error = new Error('ক্রয়ের মাস YYYY-MM আকারে এবং বছর ২০২০–২২০০-এর মধ্যে দিতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
+  const [year, monthNumber] = month.split('-').map(Number);
+  const next = monthNumber === 12 ? `${year + 1}-01` : `${year}-${String(monthNumber + 1).padStart(2, '0')}`;
+  return {
+    start: Timestamp.fromDate(new Date(`${month}-01T00:00:00+06:00`)),
+    end: Timestamp.fromDate(new Date(`${next}-01T00:00:00+06:00`))
+  };
+}
+
+function purchasesForMonth(month) {
+  const { start, end } = supportMonthRange(month);
+  return db.collection('support_purchases').where('purchasedAt', '>=', start).where('purchasedAt', '<', end);
+}
+
+async function currentSupportSummary(now = new Date()) {
+  const monthKey = supportMonthFor(now);
+  const [config, purchases, subscriptions] = await Promise.all([
+    db.collection('support_config').doc('public').get(),
+    purchasesForMonth(monthKey).get(),
+    db.collection('support_purchases').where('activeSubscription', '==', true).get()
+  ]);
+  const newSupporters = new Set();
+  const activeSubscribers = new Set();
+  let newPurchases = 0;
+  for (const document of purchases.docs) {
+    const data = document.data();
+    if (data.acknowledged !== true || !text(data.uidHash, 128)) continue;
+    if (data.productType !== 'subscription' && !(data.productType === 'oneTime' && data.active === true)) continue;
+    newSupporters.add(data.uidHash);
+    newPurchases += 1;
+  }
+  for (const document of subscriptions.docs) {
+    const data = document.data();
+    if (data.acknowledged === true && text(data.uidHash, 128) && data.expiresAt instanceof Timestamp && data.expiresAt.toMillis() > now.getTime()) {
+      activeSubscribers.add(data.uidHash);
+    }
+  }
+  return {
+    monthKey,
+    goal: Math.round(number(config.get('goal'), 500, 1, 1_000_000)),
+    newSupporters: newSupporters.size,
+    newPurchases,
+    activeSubscribers: activeSubscribers.size
+  };
+}
+
 app.get('/healthz', (req, res) => {
   res.json({
     status: 'ok',
@@ -253,21 +312,21 @@ app.get('/healthz', (req, res) => {
 });
 
 app.get('/api/overview', asyncRoute(async (_req, res) => {
-  const [devices, events, notifications, qaris, payments, updateDoc, supportDoc] = await Promise.all([
+  const [devices, events, notifications, qaris, payments, updateDoc, support] = await Promise.all([
     collectionCount('device_tokens'),
     collectionCount('events'),
     collectionCount('notification_logs'),
     collectionCount('qaris'),
     collectionCount('payments'),
     db.collection('settings').doc('app_update').get(),
-    db.collection('support_stats').doc('current').get()
+    currentSupportSummary()
   ]);
   res.json({
     success: true,
     data: {
       counts: { devices, events, notifications, qaris, payments },
       appUpdate: updateDoc.exists ? serialize(updateDoc.data()) : null,
-      support: supportDoc.exists ? serialize(supportDoc.data()) : null,
+      support,
       projectId: PROJECT_ID,
       serverTime: new Date().toISOString()
     }
@@ -517,16 +576,20 @@ app.delete('/api/qaris/:id', asyncRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-app.get('/api/support', asyncRoute(async (_req, res) => {
+app.get('/api/support', asyncRoute(async (req, res) => {
+  const now = new Date();
+  const historyMonth = req.query.month === undefined ? supportMonthFor(now) : String(req.query.month);
+  const historyQuery = historyMonth === 'all' ? db.collection('support_purchases') : purchasesForMonth(historyMonth);
   const [stats, config, purchases] = await Promise.all([
-    db.collection('support_stats').doc('current').get(),
+    currentSupportSummary(now),
     db.collection('support_config').doc('public').get(),
-    db.collection('support_purchases').orderBy('updatedAt', 'desc').limit(50).get()
+    historyQuery.orderBy('purchasedAt', 'desc').limit(50).get()
   ]);
   res.json({
     success: true,
     data: {
-      stats: stats.exists ? serialize(stats.data()) : {},
+      stats,
+      historyMonth,
       config: config.exists ? serialize(config.data()) : {},
       purchases: purchases.docs.map(documentData)
     }

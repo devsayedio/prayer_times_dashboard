@@ -10,6 +10,7 @@ const state = {
   support: null,
   modal: null,
   pageLoadId: 0,
+  supportLoadId: 0,
   modalOpener: null
 };
 
@@ -74,6 +75,11 @@ function bindForms() {
   document.getElementById('appUpdateForm').addEventListener('submit', saveAppUpdate);
   document.getElementById('noticeForm').addEventListener('submit', saveNotice);
   document.getElementById('supportGoalForm').addEventListener('submit', saveSupportGoal);
+  document.getElementById('supportHistoryMonth').addEventListener('change', () => loadPage('support', true));
+  document.getElementById('supportHistoryScope').addEventListener('change', event => {
+    document.getElementById('supportHistoryMonth').disabled = event.target.value === 'all';
+    loadPage('support', true);
+  });
   document.getElementById('eventsYear').addEventListener('change', () => loadEvents(true));
   document.getElementById('newEventBtn').addEventListener('click', () => openEventEditor());
   document.getElementById('newPaymentBtn').addEventListener('click', () => openPaymentEditor());
@@ -169,12 +175,13 @@ function renderOverview() {
     summaryRow('Force update', update.force_update ? badge('চালু', 'danger') : badge('বন্ধ', 'success'))
   ].join('');
   const support = state.overview.support || {};
-  const current = Number(support.currentSupporters || 0);
+  const current = Number(support.newSupporters || 0);
   const goal = Number(support.goal || 500);
   const percentage = goal ? Math.min(100, Math.round(current / goal * 100)) : 0;
   document.getElementById('supportSummary').innerHTML = [
-    summaryRow('Supporters', `${formatNumber(current)} / ${formatNumber(goal)}`),
-    summaryRow('Contributions', formatNumber(support.totalContributions || 0)),
+    summaryRow('এই মাসের নতুন সাপোর্টার', `${formatNumber(current)} / ${formatNumber(goal)}`),
+    summaryRow('এই মাসের নতুন ক্রয়', formatNumber(support.newPurchases || 0)),
+    summaryRow('চলমান subscription সাপোর্টার', formatNumber(support.activeSubscribers || 0)),
     `<div><div class="summary-row"><span>লক্ষ্যের অগ্রগতি</span><strong>${percentage}%</strong></div><div class="progress"><i style="width:${percentage}%"></i></div></div>`
   ].join('');
 }
@@ -320,19 +327,32 @@ async function loadQaris() {
 }
 
 async function loadSupport() {
-  state.support = await api('/api/support');
+  const loadId = ++state.supportLoadId;
+  const selectedMonth = document.getElementById('supportHistoryScope').value === 'all'
+    ? 'all' : document.getElementById('supportHistoryMonth').value;
+  let support;
+  try {
+    support = await api(`/api/support${selectedMonth ? `?month=${encodeURIComponent(selectedMonth)}` : ''}`);
+  } catch (error) {
+    if (loadId !== state.supportLoadId) return;
+    throw error;
+  }
+  if (loadId !== state.supportLoadId) return;
+  state.support = support;
   const stats = state.support.stats || {};
   const config = state.support.config || {};
   document.getElementById('supportStats').innerHTML = [
-    statCard('বর্তমান সাপোর্টার', stats.currentSupporters, '♡'),
+    statCard('এই মাসের নতুন সাপোর্টার', stats.newSupporters, '♡'),
     statCard('Monthly goal', stats.goal || config.goal || 500, '◎'),
-    statCard('Contributions', stats.totalContributions, '৳', '#ecfdf3', '#039855'),
-    statCard('Purchase records', state.support.purchases.length, '▤', '#fff7ed', '#dc6803')
+    statCard('এই মাসের নতুন ক্রয়', stats.newPurchases, '৳', '#ecfdf3', '#039855'),
+    statCard('চলমান subscription সাপোর্টার', stats.activeSubscribers, '↻', '#fff7ed', '#dc6803'),
+    statCard('নির্বাচিত history-তে record', state.support.purchases.length, '▤', '#f5f3ff', '#7c3aed')
   ].join('');
   document.getElementById('supportGoalForm').elements.goal.value = config.goal || stats.goal || 500;
+  if (!document.getElementById('supportHistoryMonth').value) document.getElementById('supportHistoryMonth').value = stats.monthKey;
   document.getElementById('supportTable').innerHTML = state.support.purchases.length
-    ? state.support.purchases.map(item => `<tr><td><strong>${escapeHtml(item.productId || '—')}</strong></td><td>${escapeHtml(item.productType || '—')}</td><td>${escapeHtml(item.supportMonth || '—')}</td><td>${item.active ? badge('Active', 'success') : badge('Inactive', 'danger')}</td><td>${item.acknowledged ? badge('Yes', 'success') : badge('No', 'danger')}</td><td>${formatDateTime(item.updatedAt)}</td><td><div class="row-actions"><button class="mini-btn danger" data-action="delete-purchase" data-id="${escapeHtml(item.id)}">Delete</button></div></td></tr>`).join('')
-    : emptyRow(7, 'কোনো verified purchase নেই');
+    ? state.support.purchases.map(item => `<tr><td><strong>${escapeHtml(item.productId || '—')}</strong></td><td>${escapeHtml(item.productType || '—')}</td><td>${formatDateTime(item.purchasedAt)}</td><td>${item.active ? badge('Active', 'success') : badge('Inactive', 'danger')}</td><td>${item.acknowledged ? badge('Yes', 'success') : badge('No', 'danger')}</td><td>${formatDateTime(item.updatedAt)}</td><td><div class="row-actions"><button class="mini-btn danger" data-action="delete-purchase" data-id="${escapeHtml(item.id)}">Delete</button></div></td></tr>`).join('')
+    : emptyRow(7, 'নির্বাচিত মাসে কোনো ক্রয়ের record নেই');
 }
 
 async function saveSupportGoal(event) {
