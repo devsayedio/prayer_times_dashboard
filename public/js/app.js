@@ -8,7 +8,10 @@ const state = {
   payments: [],
   qaris: [],
   support: null,
-  modal: null
+  modal: null,
+  pageLoadId: 0,
+  supportLoadId: 0,
+  modalOpener: null
 };
 
 const pageMeta = {
@@ -54,6 +57,13 @@ function bindNavigation() {
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') closeModal();
+    if (event.key === 'Tab' && state.modal) {
+      const elements = [...document.getElementById('editorModal').querySelectorAll('button:not(:disabled),input,select,textarea')];
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
   });
 }
 
@@ -65,6 +75,11 @@ function bindForms() {
   document.getElementById('appUpdateForm').addEventListener('submit', saveAppUpdate);
   document.getElementById('noticeForm').addEventListener('submit', saveNotice);
   document.getElementById('supportGoalForm').addEventListener('submit', saveSupportGoal);
+  document.getElementById('supportHistoryMonth').addEventListener('change', () => loadPage('support', true));
+  document.getElementById('supportHistoryScope').addEventListener('change', event => {
+    document.getElementById('supportHistoryMonth').disabled = event.target.value === 'all';
+    loadPage('support', true);
+  });
   document.getElementById('eventsYear').addEventListener('change', () => loadEvents(true));
   document.getElementById('newEventBtn').addEventListener('click', () => openEventEditor());
   document.getElementById('newPaymentBtn').addEventListener('click', () => openPaymentEditor());
@@ -84,6 +99,7 @@ function navigate(page) {
 }
 
 async function loadPage(page, force = false) {
+  const loadId = ++state.pageLoadId;
   clearError();
   const loaders = {
     overview: loadOverview,
@@ -97,26 +113,40 @@ async function loadPage(page, force = false) {
   };
   try {
     setLoading(true);
+    setSyncStatus('loading', 'সংযোগ হচ্ছে…');
     await loaders[page](force);
-    document.getElementById('syncText').textContent = `Live · ${new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' })}`;
+    if (loadId === state.pageLoadId) setSyncStatus('live', `Live · ${new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' })}`);
   } catch (error) {
-    showError(error.message);
+    if (loadId === state.pageLoadId) {
+      setSyncStatus('error', 'সংযোগ ব্যর্থ');
+      showError(error.message);
+    }
   } finally {
-    setLoading(false);
+    if (loadId === state.pageLoadId) setLoading(false);
   }
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
-  });
-  let body;
-  try { body = await response.json(); } catch (_) { body = {}; }
-  if (!response.ok || body.success === false) {
-    throw new Error(body.detail || body.message || `Request failed (${response.status})`);
-  }
-  return body.data ?? body;
+  const controller = new AbortController();
+  const timeout = (!options.method || options.method === 'GET')
+    ? window.setTimeout(() => controller.abort(), 20000) : null;
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+    });
+    let body;
+    try { body = await response.json(); }
+    catch (_) { throw new Error(`সার্ভার থেকে সঠিক response আসেনি (${response.status})`); }
+    if (!response.ok || body.success === false) {
+      throw new Error(body.detail || body.message || `Request failed (${response.status})`);
+    }
+    return body.data ?? body;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('২০ সেকেন্ডেও সার্ভারের response আসেনি। Firebase login ও সংযোগ পরীক্ষা করে রিফ্রেশ করুন।');
+    throw error;
+  } finally { if (timeout !== null) window.clearTimeout(timeout); }
 }
 
 async function loadOverview(force = false) {
@@ -145,12 +175,13 @@ function renderOverview() {
     summaryRow('Force update', update.force_update ? badge('চালু', 'danger') : badge('বন্ধ', 'success'))
   ].join('');
   const support = state.overview.support || {};
-  const current = Number(support.currentSupporters || 0);
+  const current = Number(support.newSupporters || 0);
   const goal = Number(support.goal || 500);
   const percentage = goal ? Math.min(100, Math.round(current / goal * 100)) : 0;
   document.getElementById('supportSummary').innerHTML = [
-    summaryRow('Supporters', `${formatNumber(current)} / ${formatNumber(goal)}`),
-    summaryRow('Contributions', formatNumber(support.totalContributions || 0)),
+    summaryRow('এই মাসের নতুন সাপোর্টার', `${formatNumber(current)} / ${formatNumber(goal)}`),
+    summaryRow('এই মাসের নতুন ক্রয়', formatNumber(support.newPurchases || 0)),
+    summaryRow('চলমান subscription সাপোর্টার', formatNumber(support.activeSubscribers || 0)),
     `<div><div class="summary-row"><span>লক্ষ্যের অগ্রগতি</span><strong>${percentage}%</strong></div><div class="progress"><i style="width:${percentage}%"></i></div></div>`
   ].join('');
 }
@@ -165,7 +196,7 @@ async function loadAnalytics(force = false) {
     statCard('সক্রিয় ২৪ ঘণ্টা', data.activeUsers?.last24h, '◷', '#ecfdf3', '#039855'),
     statCard('সক্রিয় ৭ দিন', data.activeUsers?.last7d, '7', '#fff7ed', '#dc6803'),
     statCard('সক্রিয় ৩০ দিন', data.activeUsers?.last30d, '30', '#f5f3ff', '#7c3aed'),
-    statCard('Delivery success', `${rate}%`, '✓', '#ecfdf3', '#039855')
+    statCard('FCM acceptance', `${rate}%`, '✓', '#ecfdf3', '#039855')
   ].join('');
   renderTrend('analyticsTrend', data.registrationTrend || []);
   renderDistribution('platformDistribution', data.platformDistribution || [], 'platform');
@@ -196,35 +227,53 @@ function renderDistribution(id, items, labelKey) {
 }
 
 async function loadNotifications() {
-  const items = await api('/api/notifications');
+  const [items, metrics] = await Promise.all([
+    api('/api/notifications'),
+    api('/api/notifications/metrics')
+  ]);
+  document.getElementById('notificationStats').innerHTML = [
+    statCard('মোট campaign', metrics.campaigns, '◉'),
+    statCard('Targeted devices', metrics.targeted, '◎'),
+    statCard('App received', metrics.received, '↓', '#ecfdf3', '#039855'),
+    statCard('Opened', metrics.opened, '↗', '#fff7ed', '#dc6803'),
+    statCard('Open rate', `${metrics.openRate || 0}%`, '%', '#f5f3ff', '#7c3aed')
+  ].join('');
   document.getElementById('notificationHistory').innerHTML = items.length
-    ? items.map(item => `<div class="timeline-item ${item.status === 'success' ? '' : 'fail'}"><i></i><div><div class="timeline-head"><strong>${escapeHtml(item.title || 'Untitled')}</strong><button class="mini-btn danger" data-action="delete-notification" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.title || 'Notification')} history delete করুন">Delete</button></div><p>${escapeHtml(item.body || '')}</p><div class="timeline-meta"><small>${escapeHtml(item.target || 'unknown')} · ${formatDateTime(item.timestamp)} · ${escapeHtml(item.status || 'unknown')}</small>${notificationAudienceBadge(item)}</div></div></div>`).join('')
+    ? items.map(item => `<div class="timeline-item ${item.status === 'fail' ? 'fail' : item.status === 'partial' || item.status === 'sending' ? 'pending' : ''}"><i></i><div><div class="timeline-head"><strong>${escapeHtml(item.title || 'Untitled')}</strong><button class="mini-btn danger" data-action="delete-notification" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.title || 'Notification')} history delete করুন">Delete</button></div><p>${escapeHtml(item.body || '')}</p><div class="timeline-meta"><small>${escapeHtml(item.target || 'unknown')} · ${formatDateTime(item.timestamp)} · ${escapeHtml(({ success: 'সফল', partial: 'আংশিক সফল', fail: 'ব্যর্থ', sending: 'পাঠানো হচ্ছে' })[item.status] || item.status || 'unknown')}</small>${notificationTrackingBadges(item)}</div></div></div>`).join('')
     : '<div class="empty-state">কোনো notification history নেই</div>';
 }
 
-function notificationAudienceBadge(item) {
-  const count = Number(item.targetedCount);
-  if (Number.isFinite(count) && count >= 0) {
-    return `<span class="audience-badge">Targeted: ${formatNumber(count)} device${count === 1 ? '' : 's'}</span>`;
+function notificationTrackingBadges(item) {
+  const targeted = Number(item.targetedCount);
+  const received = Number(item.receivedCount);
+  const opened = Number(item.openedCount);
+  const targetedLabel = Number.isFinite(targeted) && targeted >= 0
+    ? formatNumber(targeted)
+    : item.target === 'single_user' ? '১' : 'তথ্য নেই';
+  if (!Number.isFinite(received) || !Number.isFinite(opened)) {
+    return `<span class="tracking-badges"><span class="audience-badge">Targeted: ${targetedLabel}</span><span class="audience-badge unavailable">Tracking: legacy</span></span>`;
   }
-  if (item.target === 'single_user') {
-    return '<span class="audience-badge">Targeted: ১ device</span>';
-  }
-  return '<span class="audience-badge unavailable">Targeted: তথ্য নেই</span>';
+  const openRate = received > 0 ? (opened / received * 100).toFixed(1) : '0.0';
+  return `<span class="tracking-badges"><span class="audience-badge">Targeted: ${targetedLabel}</span><span class="audience-badge received">Received: ${formatNumber(received)}</span><span class="audience-badge opened">Opened: ${formatNumber(opened)} (${openRate}%)</span></span>`;
 }
 
 async function sendNotification(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const values = Object.fromEntries(new FormData(form));
-  const targetText = values.target === 'all_users' ? 'সব ব্যবহারকারী' : 'একটি নির্দিষ্ট ডিভাইস';
+  const targetText = values.target === 'all_users' ? 'নিবন্ধিত সব ডিভাইস' : 'একটি নির্দিষ্ট ডিভাইস';
   if (!window.confirm(`${targetText}-এর কাছে এই notification পাঠাবেন?`)) return;
   await submitForm(form, async () => {
-    const result = await api('/api/notifications/send', { method: 'POST', body: JSON.stringify(values) });
-    toast(result.message || 'Notification পাঠানো হয়েছে');
-    form.reset();
-    document.getElementById('tokenField').classList.add('hidden');
-    await loadNotifications();
+    try {
+      const result = await api('/api/notifications/send', { method: 'POST', body: JSON.stringify(values) });
+      toast(result.message || 'Notification পাঠানো হয়েছে');
+      form.reset();
+      document.getElementById('tokenField').classList.add('hidden');
+    } finally {
+      state.analytics = null;
+      state.overview = null;
+      await loadNotifications().catch(error => toast(`History refresh ব্যর্থ: ${error.message}`, true));
+    }
   });
 }
 
@@ -278,19 +327,32 @@ async function loadQaris() {
 }
 
 async function loadSupport() {
-  state.support = await api('/api/support');
+  const loadId = ++state.supportLoadId;
+  const selectedMonth = document.getElementById('supportHistoryScope').value === 'all'
+    ? 'all' : document.getElementById('supportHistoryMonth').value;
+  let support;
+  try {
+    support = await api(`/api/support${selectedMonth ? `?month=${encodeURIComponent(selectedMonth)}` : ''}`);
+  } catch (error) {
+    if (loadId !== state.supportLoadId) return;
+    throw error;
+  }
+  if (loadId !== state.supportLoadId) return;
+  state.support = support;
   const stats = state.support.stats || {};
   const config = state.support.config || {};
   document.getElementById('supportStats').innerHTML = [
-    statCard('বর্তমান সাপোর্টার', stats.currentSupporters, '♡'),
+    statCard('এই মাসের নতুন সাপোর্টার', stats.newSupporters, '♡'),
     statCard('Monthly goal', stats.goal || config.goal || 500, '◎'),
-    statCard('Contributions', stats.totalContributions, '৳', '#ecfdf3', '#039855'),
-    statCard('Purchase records', state.support.purchases.length, '▤', '#fff7ed', '#dc6803')
+    statCard('এই মাসের নতুন ক্রয়', stats.newPurchases, '৳', '#ecfdf3', '#039855'),
+    statCard('চলমান subscription সাপোর্টার', stats.activeSubscribers, '↻', '#fff7ed', '#dc6803'),
+    statCard('নির্বাচিত history-তে record', state.support.purchases.length, '▤', '#f5f3ff', '#7c3aed')
   ].join('');
   document.getElementById('supportGoalForm').elements.goal.value = config.goal || stats.goal || 500;
+  if (!document.getElementById('supportHistoryMonth').value) document.getElementById('supportHistoryMonth').value = stats.monthKey;
   document.getElementById('supportTable').innerHTML = state.support.purchases.length
-    ? state.support.purchases.map(item => `<tr><td><strong>${escapeHtml(item.productId || '—')}</strong></td><td>${escapeHtml(item.productType || '—')}</td><td>${escapeHtml(item.supportMonth || '—')}</td><td>${item.active ? badge('Active', 'success') : badge('Inactive', 'danger')}</td><td>${item.acknowledged ? badge('Yes', 'success') : badge('No', 'danger')}</td><td>${formatDateTime(item.updatedAt)}</td><td><div class="row-actions"><button class="mini-btn danger" data-action="delete-purchase" data-id="${escapeHtml(item.id)}">Delete</button></div></td></tr>`).join('')
-    : emptyRow(7, 'কোনো verified purchase নেই');
+    ? state.support.purchases.map(item => `<tr><td><strong>${escapeHtml(item.productId || '—')}</strong></td><td>${escapeHtml(item.productType || '—')}</td><td>${formatDateTime(item.purchasedAt)}</td><td>${item.active ? badge('Active', 'success') : badge('Inactive', 'danger')}</td><td>${item.acknowledged ? badge('Yes', 'success') : badge('No', 'danger')}</td><td>${formatDateTime(item.updatedAt)}</td><td><div class="row-actions"><button class="mini-btn danger" data-action="delete-purchase" data-id="${escapeHtml(item.id)}">Delete</button></div></td></tr>`).join('')
+    : emptyRow(7, 'নির্বাচিত মাসে কোনো ক্রয়ের record নেই');
 }
 
 async function saveSupportGoal(event) {
@@ -393,26 +455,33 @@ function openQariEditor(item = {}) {
 }
 
 function openModal(title, kicker, content) {
+  state.modalOpener = document.activeElement;
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalKicker').textContent = kicker;
   document.getElementById('editorForm').innerHTML = content;
   const modal = document.getElementById('editorModal');
   modal.classList.add('active');
   modal.setAttribute('aria-hidden', 'false');
+  document.querySelector('.app-shell').inert = true;
   document.getElementById('editorForm').querySelector('input,select,textarea')?.focus();
 }
 
 function closeModal() {
+  if (state.modal?.saving) return;
   state.modal = null;
   const modal = document.getElementById('editorModal');
   modal.classList.remove('active');
   modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-shell').inert = false;
+  state.modalOpener?.focus();
+  state.modalOpener = null;
 }
 
 async function saveEditor(event) {
   event.preventDefault();
   if (!state.modal) return;
   const form = event.currentTarget;
+  const modal = state.modal;
   const values = Object.fromEntries(new FormData(form));
   values.is_active = form.elements.is_active?.checked ?? true;
   if (state.modal.entity === 'qari') {
@@ -423,14 +492,22 @@ async function saveEditor(event) {
   const plural = state.modal.entity === 'qari' ? 'qaris' : `${state.modal.entity}s`;
   const url = state.modal.id ? `/api/${plural}/${encodeURIComponent(state.modal.id)}` : `/api/${plural}`;
   const method = state.modal.id ? 'PUT' : 'POST';
-  await submitForm(form, async () => {
-    await api(url, { method, body: JSON.stringify(values) });
-    const entity = state.modal.entity;
-    closeModal();
-    state.overview = null;
-    toast('তথ্য সংরক্ষণ হয়েছে');
-    await ({ event: loadEvents, payment: loadPayments, qari: loadQaris })[entity](true);
-  });
+  modal.saving = true;
+  document.getElementById('modalCloseBtn').disabled = true;
+  try {
+    await submitForm(form, async () => {
+      await api(url, { method, body: JSON.stringify(values) });
+      const entity = modal.entity;
+      modal.saving = false;
+      closeModal();
+      state.overview = null;
+      toast('তথ্য সংরক্ষণ হয়েছে');
+      await ({ event: loadEvents, payment: loadPayments, qari: loadQaris })[entity](true);
+    });
+  } finally {
+    modal.saving = false;
+    document.getElementById('modalCloseBtn').disabled = false;
+  }
 }
 
 function field(name, label, value = '', type = 'text', isRequired = false, className = '') {
@@ -502,6 +579,11 @@ function showError(message) {
 
 function clearError() {
   document.getElementById('errorBanner').classList.add('hidden');
+}
+
+function setSyncStatus(status, message) {
+  document.getElementById('syncState').dataset.status = status;
+  document.getElementById('syncText').textContent = message;
 }
 
 function toast(message, isError = false) {

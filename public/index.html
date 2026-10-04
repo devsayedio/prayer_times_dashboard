@@ -38,7 +38,7 @@
           <div><p id="eyebrow">আজকের সারসংক্ষেপ</p><h1 id="pageTitle">ড্যাশবোর্ড ওভারভিউ</h1></div>
         </div>
         <div class="topbar-actions">
-          <div class="sync-state"><span class="status-dot"></span><span id="syncText">Live</span></div>
+          <div class="sync-state" id="syncState" data-status="loading" role="status"><span class="status-dot"></span><span id="syncText">সংযোগ হচ্ছে…</span></div>
           <button class="icon-btn" id="themeBtn" aria-label="থিম পরিবর্তন করুন">◐</button>
           <button class="btn btn-secondary" id="refreshBtn">↻ রিফ্রেশ</button>
         </div>
@@ -74,19 +74,20 @@
 
       <section class="page" id="page-notifications">
         <div class="section-head"><div><p class="kicker">Firebase Cloud Messaging</p><h2>Push notification</h2></div></div>
+        <div class="stat-grid" id="notificationStats"></div>
         <div class="dashboard-grid">
           <article class="panel form-panel"><div class="panel-head"><div><h3>নতুন notification</h3><p class="muted">পাঠানোর আগে content ও target যাচাই করুন</p></div></div>
             <form id="notificationForm" class="form-grid">
-              <label class="field"><span>Target</span><select name="target" id="notificationTarget"><option value="all_users">সকল ব্যবহারকারী</option><option value="single_user">নির্দিষ্ট ডিভাইস</option></select></label>
+              <label class="field"><span>Target</span><select name="target" id="notificationTarget"><option value="all_users">নিবন্ধিত সব ডিভাইস</option><option value="single_user">নির্দিষ্ট ডিভাইস</option></select></label>
               <label class="field full hidden" id="tokenField"><span>FCM token</span><textarea name="fcmToken" rows="3" placeholder="Device FCM token"></textarea></label>
               <label class="field full"><span>Title</span><input name="title" maxlength="140" required placeholder="Notification title"></label>
               <label class="field full"><span>Message</span><textarea name="body" maxlength="500" rows="4" required placeholder="সংক্ষিপ্ত বার্তা লিখুন"></textarea></label>
               <label class="field"><span>Image URL <em>optional</em></span><input name="imageUrl" type="url" placeholder="https://..."></label>
               <label class="field"><span>Action URL <em>optional</em></span><input name="actionUrl" type="url" placeholder="https://..."></label>
-              <div class="form-actions full"><p class="form-warning">সতর্কতা: “সকল ব্যবহারকারী” নির্বাচন করলে topic-এর সব subscriber বার্তাটি পাবেন।</p><button class="btn btn-primary" type="submit">Notification পাঠান</button></div>
+              <div class="form-actions full"><p class="form-warning">“নিবন্ধিত সব ডিভাইস” নির্বাচন করলে সংরক্ষিত unique FCM token-গুলোতে বার্তা পাঠানো হবে।</p><button class="btn btn-primary" type="submit">Notification পাঠান</button></div>
             </form>
           </article>
-          <article class="panel"><div class="panel-head"><div><h3>সাম্প্রতিক history</h3><p class="muted">সর্বশেষ ৫০টি send attempt ও targeted device count</p></div></div><div class="timeline" id="notificationHistory"></div></article>
+          <article class="panel"><div class="panel-head"><div><h3>সাম্প্রতিক history</h3><p class="muted">Targeted, app-received ও opened device count</p></div></div><div class="timeline" id="notificationHistory"></div></article>
         </div>
       </section>
 
@@ -130,13 +131,13 @@
         <div class="section-head"><div><p class="kicker">Google Play Billing</p><h2>সাপোর্টার ও contribution</h2></div></div>
         <div class="stat-grid" id="supportStats"></div>
         <article class="panel compact-panel"><form id="supportGoalForm" class="inline-form"><label class="field"><span>Monthly supporter goal</span><input type="number" name="goal" min="1" max="1000000" required></label><button class="btn btn-primary" type="submit">Goal আপডেট</button></form></article>
-        <article class="panel"><div class="panel-head"><div><h3>সাম্প্রতিক verified purchases</h3><p class="muted">Token ও user identifiers hash করা অবস্থায় দেখানো হয়</p></div></div><div class="table-wrap"><table><thead><tr><th>Product</th><th>Type</th><th>Purchase month</th><th>Active</th><th>Acknowledged</th><th>Updated</th><th></th></tr></thead><tbody id="supportTable"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head support-history-head"><div><h3>ক্রয়ের ইতিহাস</h3><p class="muted">ক্রয়ের শুরুর তারিখ অনুযায়ী মাস নির্বাচন করুন। আগের সক্রিয় subscription আলাদা হিসাবে দেখানো হয়।</p></div><div class="inline-actions"><label class="field"><span>ইতিহাসের মাস</span><input type="month" id="supportHistoryMonth" min="2020-01" max="2200-12"></label><label class="field"><span>দেখান</span><select id="supportHistoryScope"><option value="month">নির্বাচিত মাস</option><option value="all">সব মাস</option></select></label></div></div><p class="muted">এখানে যাচাইকৃত নতুন ক্রয় গণনা করা হয়। Subscription renewal ও জমা হওয়া টাকার হিসাব এতে অন্তর্ভুক্ত নয়। ইতিহাসে সর্বশেষ ৫০টি record দেখানো হয়।</p><div class="table-wrap"><table><thead><tr><th>Product</th><th>Type</th><th>ক্রয়ের তারিখ</th><th>Active</th><th>Acknowledged</th><th>Updated</th><th></th></tr></thead><tbody id="supportTable"></tbody></table></div></article>
       </section>
     </main>
   </div>
 
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-  <div class="modal" id="editorModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div><p class="kicker" id="modalKicker">Editor</p><h2 id="modalTitle">তথ্য সম্পাদনা</h2></div><button class="icon-btn" id="modalCloseBtn" aria-label="বন্ধ করুন">×</button></div><form id="editorForm" class="form-grid modal-body"></form></div></div>
+  <div class="modal" id="editorModal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><div class="modal-head"><div><p class="kicker" id="modalKicker">Editor</p><h2 id="modalTitle">তথ্য সম্পাদনা</h2></div><button class="icon-btn" id="modalCloseBtn" aria-label="বন্ধ করুন">×</button></div><form id="editorForm" class="form-grid modal-body"></form></div></div>
   <script src="/js/app.js" defer></script>
 </body>
 </html>

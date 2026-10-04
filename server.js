@@ -9,6 +9,7 @@ const express = require('express');
 const { applicationDefault, cert, getApps, initializeApp } = require('firebase-admin/app');
 const { FieldValue, Timestamp, getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
+const { sendTrackedNotification } = require('./lib/notification_sender');
 const packageInfo = require('./package.json');
 
 const ROOT = __dirname;
@@ -127,7 +128,8 @@ function validId(value) {
 
 function isoDate(value, name = 'date') {
   const result = required(value, name, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(Date.parse(`${result}T00:00:00Z`))) {
+  const parsed = new Date(`${result}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== result) {
     const error = new Error(`${name} must use YYYY-MM-DD.`);
     error.statusCode = 400;
     throw error;
@@ -150,13 +152,19 @@ function documentData(document) {
 
 function eventPayload(body) {
   const date = isoDate(body.date);
+  const year = Number(date.slice(0, 4));
+  if (body.year != null && Number(body.year) !== year) {
+    const error = new Error('বছর ও তারিখের বছর একই হতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
   return {
     title: required(body.title, 'title', 140),
     description: text(body.description, 1200),
     holiday_type: text(body.holiday_type, 80),
     date,
     color: /^#[\dA-Fa-f]{6}$/.test(text(body.color, 7)) ? text(body.color, 7) : '#4D7AEB',
-    year: positiveInteger(body.year, Number(date.slice(0, 4)), 2200),
+    year,
     is_active: boolean(body.is_active, true),
     updated_at: FieldValue.serverTimestamp()
   };
@@ -193,11 +201,19 @@ function paymentPayload(body) {
 }
 
 function qariPayload(body) {
-  const durations = body.durations && typeof body.durations === 'object'
-    ? Object.fromEntries(Object.entries(body.durations)
-      .filter(([key, value]) => /^\d{3}$/.test(key) && Number.isFinite(Number(value)) && Number(value) > 0)
-      .map(([key, value]) => [key, Math.round(Number(value))]))
-    : {};
+  const durations = body.durations === undefined ? {} : body.durations;
+  if (!durations || typeof durations !== 'object' || Array.isArray(durations) || Object.entries(durations).some(([key, value]) =>
+    !/^\d{3}$/.test(key) || Number(key) < 1 || Number(key) > 114 || !Number.isSafeInteger(value) || value <= 0)) {
+    const error = new Error('Durations একটি JSON object হতে হবে: সূরা 001–114 এবং duration ধনাত্মক পূর্ণসংখ্যা (milliseconds)।');
+    error.statusCode = 400;
+    throw error;
+  }
+  const totalSurahs = body.total_surahs === undefined ? Object.keys(durations).length : Number(body.total_surahs);
+  if (!Number.isInteger(totalSurahs) || totalSurahs < 1 || totalSurahs > 114) {
+    const error = new Error('Total surahs ১ থেকে ১১৪-এর মধ্যে পূর্ণসংখ্যা হতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
   return {
     name: required(body.name, 'name', 140),
     name_ar: text(body.name_ar, 140),
@@ -213,7 +229,7 @@ function qariPayload(body) {
     audio_base_url: required(body.audio_base_url, 'audio_base_url', 600),
     format: text(body.format, 20) || 'mp3',
     durations,
-    total_surahs: positiveInteger(body.total_surahs, Object.keys(durations).length, 114),
+    total_surahs: totalSurahs,
     tags: Array.isArray(body.tags) ? body.tags.map(item => text(item, 40)).filter(Boolean).slice(0, 20) : [],
     sort_order: Math.round(number(body.sort_order, 0, 0, 10_000)),
     is_active: boolean(body.is_active, true),
@@ -224,6 +240,65 @@ function qariPayload(body) {
 async function collectionCount(name) {
   const snapshot = await db.collection(name).count().get();
   return snapshot.data().count;
+}
+
+function supportMonthFor(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit'
+  }).formatToParts(date);
+  return `${parts.find(part => part.type === 'year').value}-${parts.find(part => part.type === 'month').value}`;
+}
+
+function supportMonthRange(month) {
+  const yearValue = Number(month.slice(0, 4));
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || yearValue < 2020 || yearValue > 2200) {
+    const error = new Error('ক্রয়ের মাস YYYY-MM আকারে এবং বছর ২০২০–২২০০-এর মধ্যে দিতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
+  const [year, monthNumber] = month.split('-').map(Number);
+  const next = monthNumber === 12 ? `${year + 1}-01` : `${year}-${String(monthNumber + 1).padStart(2, '0')}`;
+  return {
+    start: Timestamp.fromDate(new Date(`${month}-01T00:00:00+06:00`)),
+    end: Timestamp.fromDate(new Date(`${next}-01T00:00:00+06:00`))
+  };
+}
+
+function purchasesForMonth(month) {
+  const { start, end } = supportMonthRange(month);
+  return db.collection('support_purchases').where('purchasedAt', '>=', start).where('purchasedAt', '<', end);
+}
+
+async function currentSupportSummary(now = new Date()) {
+  const monthKey = supportMonthFor(now);
+  const [config, purchases, subscriptions] = await Promise.all([
+    db.collection('support_config').doc('public').get(),
+    purchasesForMonth(monthKey).get(),
+    db.collection('support_purchases').where('activeSubscription', '==', true).get()
+  ]);
+  const newSupporters = new Set();
+  const activeSubscribers = new Set();
+  let newPurchases = 0;
+  for (const document of purchases.docs) {
+    const data = document.data();
+    if (data.acknowledged !== true || !text(data.uidHash, 128)) continue;
+    if (data.productType !== 'subscription' && !(data.productType === 'oneTime' && data.active === true)) continue;
+    newSupporters.add(data.uidHash);
+    newPurchases += 1;
+  }
+  for (const document of subscriptions.docs) {
+    const data = document.data();
+    if (data.acknowledged === true && text(data.uidHash, 128) && data.expiresAt instanceof Timestamp && data.expiresAt.toMillis() > now.getTime()) {
+      activeSubscribers.add(data.uidHash);
+    }
+  }
+  return {
+    monthKey,
+    goal: Math.round(number(config.get('goal'), 500, 1, 1_000_000)),
+    newSupporters: newSupporters.size,
+    newPurchases,
+    activeSubscribers: activeSubscribers.size
+  };
 }
 
 app.get('/healthz', (req, res) => {
@@ -237,21 +312,21 @@ app.get('/healthz', (req, res) => {
 });
 
 app.get('/api/overview', asyncRoute(async (_req, res) => {
-  const [devices, events, notifications, qaris, payments, updateDoc, supportDoc] = await Promise.all([
+  const [devices, events, notifications, qaris, payments, updateDoc, support] = await Promise.all([
     collectionCount('device_tokens'),
     collectionCount('events'),
     collectionCount('notification_logs'),
     collectionCount('qaris'),
     collectionCount('payments'),
     db.collection('settings').doc('app_update').get(),
-    db.collection('support_stats').doc('current').get()
+    currentSupportSummary()
   ]);
   res.json({
     success: true,
     data: {
       counts: { devices, events, notifications, qaris, payments },
       appUpdate: updateDoc.exists ? serialize(updateDoc.data()) : null,
-      support: supportDoc.exists ? serialize(supportDoc.data()) : null,
+      support,
       projectId: PROJECT_ID,
       serverTime: new Date().toISOString()
     }
@@ -287,8 +362,16 @@ app.get('/api/analytics', asyncRoute(async (_req, res) => {
 
   let success = 0;
   let failed = 0;
+  let targeted = 0;
+  let received = 0;
+  let opened = 0;
   for (const document of logsSnapshot.docs) {
-    document.data().status === 'success' ? success += 1 : failed += 1;
+    const data = document.data();
+    if (data.status === 'success' || data.status === 'partial') success += 1;
+    else if (data.status === 'fail') failed += 1;
+    targeted += number(data.targetedCount, 0, 0);
+    received += number(data.receivedCount, 0, 0);
+    opened += number(data.openedCount, 0, 0);
   }
 
   const trend = Array.from({ length: 30 }, (_, index) => {
@@ -300,7 +383,14 @@ app.get('/api/analytics', asyncRoute(async (_req, res) => {
     data: {
       totalUsers: devicesSnapshot.size,
       activeUsers,
-      notificationStats: { total: success + failed, success, fail: failed },
+      notificationStats: {
+        total: logsSnapshot.size,
+        success,
+        fail: failed,
+        targeted,
+        received,
+        opened
+      },
       platformDistribution: ranked(platform, 'platform'),
       appVersionDistribution: ranked(versions, 'version'),
       brandDistribution: ranked(brands, 'brand').slice(0, 10),
@@ -325,23 +415,44 @@ app.get('/api/notifications', asyncRoute(async (req, res) => {
   res.json({ success: true, data: snapshot.docs.map(documentData) });
 }));
 
+app.get('/api/notifications/metrics', asyncRoute(async (_req, res) => {
+  const snapshot = await db.collection('notification_logs').get();
+  const metrics = snapshot.docs.reduce((totals, document) => {
+    const data = document.data();
+    totals.campaigns += 1;
+    totals.targeted += number(data.targetedCount, 0, 0);
+    totals.received += number(data.receivedCount, 0, 0);
+    totals.opened += number(data.openedCount, 0, 0);
+    if (data.status === 'success' || data.status === 'partial') totals.accepted += 1;
+    if (data.status === 'fail') totals.failed += 1;
+    return totals;
+  }, { campaigns: 0, accepted: 0, failed: 0, targeted: 0, received: 0, opened: 0 });
+  metrics.openRate = metrics.received > 0
+    ? Number((metrics.opened / metrics.received * 100).toFixed(1))
+    : 0;
+  res.json({ success: true, data: metrics });
+}));
+
 app.delete('/api/notifications/:id', asyncRoute(async (req, res) => {
   const notificationId = validId(req.params.id);
   const reference = db.collection('notification_logs').doc(notificationId);
-  await db.runTransaction(async transaction => {
-    const snapshot = await transaction.get(reference);
-    if (!snapshot.exists) {
-      const error = new Error('Notification history record not found.');
-      error.statusCode = 404;
-      throw error;
-    }
-    transaction.delete(reference);
-  });
+  const snapshot = await reference.get();
+  if (!snapshot.exists) {
+    const error = new Error('Notification history record not found.');
+    error.statusCode = 404;
+    throw error;
+  }
+  await db.recursiveDelete(reference);
   res.json({ success: true, message: 'Notification history deleted from Firebase.' });
 }));
 
 app.post('/api/notifications/send', asyncRoute(async (req, res) => {
-  const target = req.body.target === 'single_user' ? 'single_user' : 'all_users';
+  const target = req.body.target;
+  if (!['single_user', 'all_users'].includes(target)) {
+    const error = new Error('নোটিফিকেশনের সঠিক target নির্বাচন করুন।');
+    error.statusCode = 400;
+    throw error;
+  }
   const title = required(req.body.title, 'title', 140);
   const body = required(req.body.body, 'body', 500);
   const fcmToken = text(req.body.fcmToken, 4096);
@@ -352,38 +463,9 @@ app.post('/api/notifications/send', asyncRoute(async (req, res) => {
   }
   const imageUrl = text(req.body.imageUrl, 1000);
   const actionUrl = text(req.body.actionUrl, 1000);
-  const targetedCount = target === 'single_user'
-    ? 1
-    : await collectionCount('device_tokens');
-  const data = { type: 'push' };
-  if (imageUrl) data.imageUrl = imageUrl;
-  if (actionUrl) data.actionUrl = actionUrl;
-
-  const message = {
-    notification: { title, body },
-    data,
-    android: {
-      priority: 'high',
-      notification: {
-        sound: 'hayya_ala_salah',
-        channelId: 'com.amatullah.prayer_times_push_notification',
-        ...(imageUrl ? { imageUrl } : {})
-      }
-    },
-    ...(target === 'single_user' ? { token: fcmToken } : { topic: 'all_users' })
-  };
-
-  let log;
-  try {
-    const messageId = await messaging.send(message);
-    log = { timestamp: FieldValue.serverTimestamp(), target, targetedCount, title, body, imageUrl, actionUrl, status: 'success', messageId };
-    await db.collection('notification_logs').add(log);
-    res.json({ success: true, message: `Notification accepted for ${targetedCount} targeted device${targetedCount === 1 ? '' : 's'}.`, messageId, targetedCount });
-  } catch (error) {
-    log = { timestamp: FieldValue.serverTimestamp(), target, targetedCount, title, body, imageUrl, actionUrl, status: 'fail', error: text(error.message, 500) };
-    await db.collection('notification_logs').add(log).catch(() => {});
-    throw error;
-  }
+  res.json(await sendTrackedNotification({
+    db, messaging, target, title, body, fcmToken, imageUrl, actionUrl
+  }));
 }));
 
 app.get('/api/events', asyncRoute(async (req, res) => {
@@ -472,7 +554,15 @@ app.post('/api/qaris', asyncRoute(async (req, res) => {
   const reference = requestedId
     ? db.collection('qaris').doc(validId(requestedId))
     : db.collection('qaris').doc();
-  await reference.set({ ...qariPayload(req.body), created_at: FieldValue.serverTimestamp() });
+  try {
+    await reference.create({ ...qariPayload(req.body), created_at: FieldValue.serverTimestamp() });
+  } catch (error) {
+    if (error.code === 6 || error.code === 'already-exists') {
+      error.statusCode = 409;
+      error.message = 'এই Document ID-তে ক্বারী আগে থেকেই আছে। নতুন ID দিন অথবা আগের ক্বারী Edit করুন।';
+    }
+    throw error;
+  }
   res.status(201).json({ success: true, id: reference.id });
 }));
 
@@ -486,16 +576,20 @@ app.delete('/api/qaris/:id', asyncRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-app.get('/api/support', asyncRoute(async (_req, res) => {
+app.get('/api/support', asyncRoute(async (req, res) => {
+  const now = new Date();
+  const historyMonth = req.query.month === undefined ? supportMonthFor(now) : String(req.query.month);
+  const historyQuery = historyMonth === 'all' ? db.collection('support_purchases') : purchasesForMonth(historyMonth);
   const [stats, config, purchases] = await Promise.all([
-    db.collection('support_stats').doc('current').get(),
+    currentSupportSummary(now),
     db.collection('support_config').doc('public').get(),
-    db.collection('support_purchases').orderBy('updatedAt', 'desc').limit(50).get()
+    historyQuery.orderBy('purchasedAt', 'desc').limit(50).get()
   ]);
   res.json({
     success: true,
     data: {
-      stats: stats.exists ? serialize(stats.data()) : {},
+      stats,
+      historyMonth,
       config: config.exists ? serialize(config.data()) : {},
       purchases: purchases.docs.map(documentData)
     }
@@ -535,12 +629,15 @@ function asyncRoute(handler) {
 app.use('/api', (_req, res) => res.status(404).json({ success: false, message: 'API endpoint not found.' }));
 
 app.use((error, _req, res, _next) => {
-  const status = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+  const credentialFailure = /invalid_grant|Could not load the default credentials|invalid authentication credentials/i.test(error.message || '');
+  const status = credentialFailure ? 503 : Number.isInteger(error.statusCode) ? error.statusCode : 500;
   console.error(`[${new Date().toISOString()}]`, error);
   res.status(status).json({
     success: false,
-    message: status >= 500 ? 'The dashboard could not complete this request.' : error.message,
-    ...(IS_PRODUCTION ? {} : { detail: error.message })
+    message: credentialFailure
+      ? 'Firebase login কাজ করছে না। টার্মিনালে gcloud auth application-default login চালিয়ে login করুন, তারপর সার্ভার restart করুন।'
+      : status >= 500 ? 'The dashboard could not complete this request.' : error.message,
+    ...(IS_PRODUCTION || credentialFailure ? {} : { detail: error.message })
   });
 });
 
