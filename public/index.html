@@ -38,7 +38,7 @@
           <div><p id="eyebrow">আজকের সারসংক্ষেপ</p><h1 id="pageTitle">ড্যাশবোর্ড ওভারভিউ</h1></div>
         </div>
         <div class="topbar-actions">
-          <div class="sync-state"><span class="status-dot"></span><span id="syncText">Live</span></div>
+          <div class="sync-state" id="syncState" data-status="loading" role="status"><span class="status-dot"></span><span id="syncText">সংযোগ হচ্ছে…</span></div>
           <button class="icon-btn" id="themeBtn" aria-label="থিম পরিবর্তন করুন">◐</button>
           <button class="btn btn-secondary" id="refreshBtn">↻ রিফ্রেশ</button>
         </div>
@@ -137,7 +137,7 @@
   </div>
 
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-  <div class="modal" id="editorModal" aria-hidden="true"><div class="modal-card"><div class="modal-head"><div><p class="kicker" id="modalKicker">Editor</p><h2 id="modalTitle">তথ্য সম্পাদনা</h2></div><button class="icon-btn" id="modalCloseBtn" aria-label="বন্ধ করুন">×</button></div><form id="editorForm" class="form-grid modal-body"></form></div></div>
+  <div class="modal" id="editorModal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><div class="modal-head"><div><p class="kicker" id="modalKicker">Editor</p><h2 id="modalTitle">তথ্য সম্পাদনা</h2></div><button class="icon-btn" id="modalCloseBtn" aria-label="বন্ধ করুন">×</button></div><form id="editorForm" class="form-grid modal-body"></form></div></div>
   <script src="/js/app.js" defer></script>
 </body>
 </html>

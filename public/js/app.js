@@ -8,7 +8,9 @@ const state = {
   payments: [],
   qaris: [],
   support: null,
-  modal: null
+  modal: null,
+  pageLoadId: 0,
+  modalOpener: null
 };
 
 const pageMeta = {
@@ -54,6 +56,13 @@ function bindNavigation() {
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') closeModal();
+    if (event.key === 'Tab' && state.modal) {
+      const elements = [...document.getElementById('editorModal').querySelectorAll('button:not(:disabled),input,select,textarea')];
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
   });
 }
 
@@ -84,6 +93,7 @@ function navigate(page) {
 }
 
 async function loadPage(page, force = false) {
+  const loadId = ++state.pageLoadId;
   clearError();
   const loaders = {
     overview: loadOverview,
@@ -97,26 +107,40 @@ async function loadPage(page, force = false) {
   };
   try {
     setLoading(true);
+    setSyncStatus('loading', 'সংযোগ হচ্ছে…');
     await loaders[page](force);
-    document.getElementById('syncText').textContent = `Live · ${new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' })}`;
+    if (loadId === state.pageLoadId) setSyncStatus('live', `Live · ${new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' })}`);
   } catch (error) {
-    showError(error.message);
+    if (loadId === state.pageLoadId) {
+      setSyncStatus('error', 'সংযোগ ব্যর্থ');
+      showError(error.message);
+    }
   } finally {
-    setLoading(false);
+    if (loadId === state.pageLoadId) setLoading(false);
   }
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
-  });
-  let body;
-  try { body = await response.json(); } catch (_) { body = {}; }
-  if (!response.ok || body.success === false) {
-    throw new Error(body.detail || body.message || `Request failed (${response.status})`);
-  }
-  return body.data ?? body;
+  const controller = new AbortController();
+  const timeout = (!options.method || options.method === 'GET')
+    ? window.setTimeout(() => controller.abort(), 20000) : null;
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+    });
+    let body;
+    try { body = await response.json(); }
+    catch (_) { throw new Error(`সার্ভার থেকে সঠিক response আসেনি (${response.status})`); }
+    if (!response.ok || body.success === false) {
+      throw new Error(body.detail || body.message || `Request failed (${response.status})`);
+    }
+    return body.data ?? body;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('২০ সেকেন্ডেও সার্ভারের response আসেনি। Firebase login ও সংযোগ পরীক্ষা করে রিফ্রেশ করুন।');
+    throw error;
+  } finally { if (timeout !== null) window.clearTimeout(timeout); }
 }
 
 async function loadOverview(force = false) {
@@ -411,26 +435,33 @@ function openQariEditor(item = {}) {
 }
 
 function openModal(title, kicker, content) {
+  state.modalOpener = document.activeElement;
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalKicker').textContent = kicker;
   document.getElementById('editorForm').innerHTML = content;
   const modal = document.getElementById('editorModal');
   modal.classList.add('active');
   modal.setAttribute('aria-hidden', 'false');
+  document.querySelector('.app-shell').inert = true;
   document.getElementById('editorForm').querySelector('input,select,textarea')?.focus();
 }
 
 function closeModal() {
+  if (state.modal?.saving) return;
   state.modal = null;
   const modal = document.getElementById('editorModal');
   modal.classList.remove('active');
   modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-shell').inert = false;
+  state.modalOpener?.focus();
+  state.modalOpener = null;
 }
 
 async function saveEditor(event) {
   event.preventDefault();
   if (!state.modal) return;
   const form = event.currentTarget;
+  const modal = state.modal;
   const values = Object.fromEntries(new FormData(form));
   values.is_active = form.elements.is_active?.checked ?? true;
   if (state.modal.entity === 'qari') {
@@ -441,14 +472,22 @@ async function saveEditor(event) {
   const plural = state.modal.entity === 'qari' ? 'qaris' : `${state.modal.entity}s`;
   const url = state.modal.id ? `/api/${plural}/${encodeURIComponent(state.modal.id)}` : `/api/${plural}`;
   const method = state.modal.id ? 'PUT' : 'POST';
-  await submitForm(form, async () => {
-    await api(url, { method, body: JSON.stringify(values) });
-    const entity = state.modal.entity;
-    closeModal();
-    state.overview = null;
-    toast('তথ্য সংরক্ষণ হয়েছে');
-    await ({ event: loadEvents, payment: loadPayments, qari: loadQaris })[entity](true);
-  });
+  modal.saving = true;
+  document.getElementById('modalCloseBtn').disabled = true;
+  try {
+    await submitForm(form, async () => {
+      await api(url, { method, body: JSON.stringify(values) });
+      const entity = modal.entity;
+      modal.saving = false;
+      closeModal();
+      state.overview = null;
+      toast('তথ্য সংরক্ষণ হয়েছে');
+      await ({ event: loadEvents, payment: loadPayments, qari: loadQaris })[entity](true);
+    });
+  } finally {
+    modal.saving = false;
+    document.getElementById('modalCloseBtn').disabled = false;
+  }
 }
 
 function field(name, label, value = '', type = 'text', isRequired = false, className = '') {
@@ -520,6 +559,11 @@ function showError(message) {
 
 function clearError() {
   document.getElementById('errorBanner').classList.add('hidden');
+}
+
+function setSyncStatus(status, message) {
+  document.getElementById('syncState').dataset.status = status;
+  document.getElementById('syncText').textContent = message;
 }
 
 function toast(message, isError = false) {

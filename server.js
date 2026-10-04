@@ -128,7 +128,8 @@ function validId(value) {
 
 function isoDate(value, name = 'date') {
   const result = required(value, name, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(Date.parse(`${result}T00:00:00Z`))) {
+  const parsed = new Date(`${result}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== result) {
     const error = new Error(`${name} must use YYYY-MM-DD.`);
     error.statusCode = 400;
     throw error;
@@ -151,13 +152,19 @@ function documentData(document) {
 
 function eventPayload(body) {
   const date = isoDate(body.date);
+  const year = Number(date.slice(0, 4));
+  if (body.year != null && Number(body.year) !== year) {
+    const error = new Error('বছর ও তারিখের বছর একই হতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
   return {
     title: required(body.title, 'title', 140),
     description: text(body.description, 1200),
     holiday_type: text(body.holiday_type, 80),
     date,
     color: /^#[\dA-Fa-f]{6}$/.test(text(body.color, 7)) ? text(body.color, 7) : '#4D7AEB',
-    year: positiveInteger(body.year, Number(date.slice(0, 4)), 2200),
+    year,
     is_active: boolean(body.is_active, true),
     updated_at: FieldValue.serverTimestamp()
   };
@@ -194,11 +201,19 @@ function paymentPayload(body) {
 }
 
 function qariPayload(body) {
-  const durations = body.durations && typeof body.durations === 'object'
-    ? Object.fromEntries(Object.entries(body.durations)
-      .filter(([key, value]) => /^\d{3}$/.test(key) && Number.isFinite(Number(value)) && Number(value) > 0)
-      .map(([key, value]) => [key, Math.round(Number(value))]))
-    : {};
+  const durations = body.durations === undefined ? {} : body.durations;
+  if (!durations || typeof durations !== 'object' || Array.isArray(durations) || Object.entries(durations).some(([key, value]) =>
+    !/^\d{3}$/.test(key) || Number(key) < 1 || Number(key) > 114 || !Number.isSafeInteger(value) || value <= 0)) {
+    const error = new Error('Durations একটি JSON object হতে হবে: সূরা 001–114 এবং duration ধনাত্মক পূর্ণসংখ্যা (milliseconds)।');
+    error.statusCode = 400;
+    throw error;
+  }
+  const totalSurahs = body.total_surahs === undefined ? Object.keys(durations).length : Number(body.total_surahs);
+  if (!Number.isInteger(totalSurahs) || totalSurahs < 1 || totalSurahs > 114) {
+    const error = new Error('Total surahs ১ থেকে ১১৪-এর মধ্যে পূর্ণসংখ্যা হতে হবে।');
+    error.statusCode = 400;
+    throw error;
+  }
   return {
     name: required(body.name, 'name', 140),
     name_ar: text(body.name_ar, 140),
@@ -214,7 +229,7 @@ function qariPayload(body) {
     audio_base_url: required(body.audio_base_url, 'audio_base_url', 600),
     format: text(body.format, 20) || 'mp3',
     durations,
-    total_surahs: positiveInteger(body.total_surahs, Object.keys(durations).length, 114),
+    total_surahs: totalSurahs,
     tags: Array.isArray(body.tags) ? body.tags.map(item => text(item, 40)).filter(Boolean).slice(0, 20) : [],
     sort_order: Math.round(number(body.sort_order, 0, 0, 10_000)),
     is_active: boolean(body.is_active, true),
@@ -480,7 +495,15 @@ app.post('/api/qaris', asyncRoute(async (req, res) => {
   const reference = requestedId
     ? db.collection('qaris').doc(validId(requestedId))
     : db.collection('qaris').doc();
-  await reference.set({ ...qariPayload(req.body), created_at: FieldValue.serverTimestamp() });
+  try {
+    await reference.create({ ...qariPayload(req.body), created_at: FieldValue.serverTimestamp() });
+  } catch (error) {
+    if (error.code === 6 || error.code === 'already-exists') {
+      error.statusCode = 409;
+      error.message = 'এই Document ID-তে ক্বারী আগে থেকেই আছে। নতুন ID দিন অথবা আগের ক্বারী Edit করুন।';
+    }
+    throw error;
+  }
   res.status(201).json({ success: true, id: reference.id });
 }));
 
@@ -543,12 +566,15 @@ function asyncRoute(handler) {
 app.use('/api', (_req, res) => res.status(404).json({ success: false, message: 'API endpoint not found.' }));
 
 app.use((error, _req, res, _next) => {
-  const status = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+  const credentialFailure = /invalid_grant|Could not load the default credentials|invalid authentication credentials/i.test(error.message || '');
+  const status = credentialFailure ? 503 : Number.isInteger(error.statusCode) ? error.statusCode : 500;
   console.error(`[${new Date().toISOString()}]`, error);
   res.status(status).json({
     success: false,
-    message: status >= 500 ? 'The dashboard could not complete this request.' : error.message,
-    ...(IS_PRODUCTION ? {} : { detail: error.message })
+    message: credentialFailure
+      ? 'Firebase login কাজ করছে না। টার্মিনালে gcloud auth application-default login চালিয়ে login করুন, তারপর সার্ভার restart করুন।'
+      : status >= 500 ? 'The dashboard could not complete this request.' : error.message,
+    ...(IS_PRODUCTION || credentialFailure ? {} : { detail: error.message })
   });
 });
 

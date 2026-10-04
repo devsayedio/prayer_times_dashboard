@@ -29,6 +29,8 @@ Prayer Times অ্যাপের জন্য Node.js + Express ভিত্�
 
 Development-এ credentials না দিলে dashboard শুধু loopback/localhost request গ্রহণ করে। Production-এ `DASHBOARD_USERNAME` এবং `DASHBOARD_PASSWORD` বাধ্যতামূলক।
 
+`service-account.json` না থাকলে সার্ভার Application Default Credentials ব্যবহার করে। সে ক্ষেত্রে `gcloud auth application-default login` চালিয়ে এই Firebase project-এর অনুমোদিত account দিয়ে login করুন। `invalid_grant` দেখালে আবার login করে সার্ভার restart করুন।
+
 ## Notification tracking
 
 এই dashboard-এর `/api/notifications/send` থেকেই campaign ও প্রতি recipient-এর গোপন receipt তৈরি হয়, তারপর FCM-এ পাঠানো হয়। সব ডিভাইসের ক্ষেত্রে `device_tokens`-এর unique token-গুলোতে সর্বোচ্চ ৫০০টি করে batch পাঠানো হয়। Topic-এর বদলে recipient অনুযায়ী পাঠানোর কারণে প্রতিটি payload-এ আলাদা tracking token দেওয়া যায়।
